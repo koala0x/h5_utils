@@ -203,7 +203,7 @@ async function onCompress() {
       <div class="brand">
         <img class="brandMark" :src="logo" alt="logo" />
         <div class="brandText">
-          <div class="brandTitle">PDF 工具箱</div>
+          <div class="brandTitle">工具箱</div>
           <!-- <div class="brandSub">本地处理</div> -->
         </div>
       </div>
