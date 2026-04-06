@@ -1,17 +1,19 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import QRCode from 'qrcode'
 import { convertPdfFileToEpubBlob } from './utils/pdfToEpub'
 import { compressPdfFileToPdfBlob } from './utils/pdfCompress'
 import logo from './assets/vue.svg'
 
-type TabId = 'epub' | 'compress' | 'json'
+type TabId = 'epub' | 'compress' | 'json' | 'qr'
 
 const activeTab = ref<TabId>('epub')
 
 const headerTitle = computed(() => {
   if (activeTab.value === 'epub') return 'PDF 转 EPUB'
   if (activeTab.value === 'compress') return 'PDF 压缩'
-  return '格式化 JSON'
+  if (activeTab.value === 'json') return '格式化 JSON'
+  return '二维码生成器'
 })
 
 const headerSubtitle = computed(() => {
@@ -247,6 +249,40 @@ function onJsonClear() {
   jsonOutput.value = ''
   jsonError.value = null
 }
+
+const qrText = ref('')
+const qrDataUrl = ref<string | null>(null)
+const qrGenerating = ref(false)
+const qrError = ref<string | null>(null)
+
+const qrCanGenerate = computed(() => qrText.value.trim().length > 0 && !qrGenerating.value)
+
+async function onQrGenerate() {
+  const text = qrText.value.trim()
+  qrError.value = null
+  qrDataUrl.value = null
+
+  if (!text) return
+
+  qrGenerating.value = true
+  try {
+    qrDataUrl.value = await QRCode.toDataURL(text, {
+      errorCorrectionLevel: 'M',
+      margin: 1,
+      width: 640,
+    })
+  } catch (e) {
+    qrError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    qrGenerating.value = false
+  }
+}
+
+function onQrClear() {
+  qrText.value = ''
+  qrDataUrl.value = null
+  qrError.value = null
+}
 </script>
 
 <template>
@@ -274,6 +310,9 @@ function onJsonClear() {
         </button>
         <button class="navItem" :class="{ active: activeTab === 'json' }" type="button" @click="activeTab = 'json'">
           格式化 JSON
+        </button>
+        <button class="navItem" :class="{ active: activeTab === 'qr' }" type="button" @click="activeTab = 'qr'">
+          二维码生成
         </button>
       </nav>
 
@@ -467,7 +506,7 @@ function onJsonClear() {
           </section>
         </main>
 
-        <main v-else class="card jsonCard">
+        <main v-else-if="activeTab === 'json'" class="card jsonCard">
           <section class="section">
             <div class="jsonGrid">
               <div class="field">
@@ -485,6 +524,32 @@ function onJsonClear() {
               </div>
 
               <div v-if="jsonError" class="alert">{{ jsonError }}</div>
+            </div>
+          </section>
+        </main>
+
+        <main v-else class="card qrCard">
+          <section class="section">
+            <div class="qrGrid">
+              <div class="field">
+                <textarea v-model="qrText" class="textArea" placeholder="输入文本或链接，然后点击生成..."></textarea>
+              </div>
+
+              <div class="qrPreview" :class="{ empty: !qrDataUrl }">
+                <img v-if="qrDataUrl" class="qrImg" :src="qrDataUrl" alt="QR Code" />
+                <div v-else class="qrEmpty">暂无二维码</div>
+              </div>
+            </div>
+
+            <div class="actions">
+              <div class="btnRow">
+                <button class="btn primary" type="button" :disabled="!qrCanGenerate" @click="onQrGenerate">
+                  {{ qrGenerating ? '生成中…' : '生成二维码' }}
+                </button>
+                <button class="btn ghost" type="button" @click="onQrClear">清空</button>
+              </div>
+
+              <div v-if="qrError" class="alert">{{ qrError }}</div>
             </div>
           </section>
         </main>
@@ -811,6 +876,39 @@ function onJsonClear() {
   margin-top: 12px;
 }
 
+.qrGrid {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  gap: 12px;
+  align-items: start;
+}
+
+.qrPreview {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.02);
+  min-height: 320px;
+  display: grid;
+  place-items: center;
+  padding: 12px;
+}
+
+.qrPreview.empty {
+  color: var(--text);
+  opacity: 0.85;
+}
+
+.qrImg {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  image-rendering: pixelated;
+}
+
+.qrEmpty {
+  font-size: 13px;
+}
+
 .btnRow {
   display: flex;
   flex-wrap: wrap;
@@ -965,6 +1063,10 @@ function onJsonClear() {
   }
 
   .jsonGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .qrGrid {
     grid-template-columns: 1fr;
   }
 }
