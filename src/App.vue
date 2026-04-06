@@ -4,9 +4,21 @@ import { convertPdfFileToEpubBlob } from './utils/pdfToEpub'
 import { compressPdfFileToPdfBlob } from './utils/pdfCompress'
 import logo from './assets/vue.svg'
 
-type TabId = 'epub' | 'compress'
+type TabId = 'epub' | 'compress' | 'json'
 
 const activeTab = ref<TabId>('epub')
+
+const headerTitle = computed(() => {
+  if (activeTab.value === 'epub') return 'PDF 转 EPUB'
+  if (activeTab.value === 'compress') return 'PDF 压缩'
+  return '格式化 JSON'
+})
+
+const headerSubtitle = computed(() => {
+  if (activeTab.value === 'epub') return '上传 PDF，一键转换为 EPUB 并下载到本地'
+  if (activeTab.value === 'compress') return '按百分比压缩 PDF（本地处理，压缩率越低越清晰）'
+  return ''
+})
 
 function downloadBlob(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob)
@@ -195,6 +207,46 @@ async function onCompress() {
     compressing.value = false
   }
 }
+
+const jsonInput = ref('')
+const jsonOutput = ref('')
+const jsonError = ref<string | null>(null)
+
+const jsonCanFormat = computed(() => jsonInput.value.trim().length > 0)
+
+function toJsonErrorMessage(e: unknown) {
+  if (e instanceof Error && e.message) return e.message
+  return String(e)
+}
+
+function formatJson(pretty: boolean) {
+  jsonError.value = null
+
+  const raw = jsonInput.value.replace(/^\uFEFF/, '').trim()
+  if (!raw) {
+    jsonOutput.value = ''
+    return
+  }
+
+  try {
+    const data = JSON.parse(raw)
+    jsonOutput.value = pretty ? JSON.stringify(data, null, 2) : JSON.stringify(data)
+  } catch (e) {
+    jsonOutput.value = ''
+    jsonError.value = `JSON 无效：${toJsonErrorMessage(e)}`
+  }
+}
+
+function onJsonFormat() {
+  formatJson(true)
+}
+
+
+function onJsonClear() {
+  jsonInput.value = ''
+  jsonOutput.value = ''
+  jsonError.value = null
+}
 </script>
 
 <template>
@@ -220,18 +272,19 @@ async function onCompress() {
         >
           PDF 压缩
         </button>
+        <button class="navItem" :class="{ active: activeTab === 'json' }" type="button" @click="activeTab = 'json'">
+          格式化 JSON
+        </button>
       </nav>
 
       <div class="sideHint">文件不会上传服务器，所有处理都在浏览器本地完成</div>
     </aside>
 
     <main class="content">
-      <div class="contentInner">
+      <div class="contentInner" :class="{ jsonWide: activeTab === 'json' }">
         <header class="header">
-          <h1 class="title">{{ activeTab === 'epub' ? 'PDF 转 EPUB' : 'PDF 压缩' }}</h1>
-          <p class="subtitle">
-            {{ activeTab === 'epub' ? '上传 PDF，一键转换为 EPUB 并下载到本地' : '按百分比压缩 PDF（本地处理，压缩率越低越清晰）' }}
-          </p>
+          <h1 class="title">{{ headerTitle }}</h1>
+          <p class="subtitle">{{ headerSubtitle }}</p>
         </header>
 
         <main v-if="activeTab === 'epub'" class="card">
@@ -322,7 +375,7 @@ async function onCompress() {
           </section>
         </main>
 
-        <main v-else class="card">
+        <main v-else-if="activeTab === 'compress'" class="card">
           <section class="section">
             <div class="sectionHeader">
               <div class="step">1</div>
@@ -410,6 +463,28 @@ async function onCompress() {
               <div class="note">
                 当前实现为“重建 PDF”：逐页渲染为图片并重新生成 PDF，以达到可控的体积压缩；会丢失原 PDF 的可选中文字与链接等信息。
               </div>
+            </div>
+          </section>
+        </main>
+
+        <main v-else class="card jsonCard">
+          <section class="section">
+            <div class="jsonGrid">
+              <div class="field">
+                <textarea v-model="jsonInput" class="textArea" placeholder="在这里粘贴 JSON..."></textarea>
+              </div>
+              <div class="field">
+                <textarea v-model="jsonOutput" class="textArea code" readonly placeholder="格式化后的结果会显示在这里"></textarea>
+              </div>
+            </div>
+
+            <div class="actions">
+              <div class="btnRow">
+                <button class="btn primary" type="button" :disabled="!jsonCanFormat" @click="onJsonFormat">格式化</button>
+                <button class="btn ghost" type="button" @click="onJsonClear">清空</button>
+              </div>
+
+              <div v-if="jsonError" class="alert">{{ jsonError }}</div>
             </div>
           </section>
         </main>
@@ -522,6 +597,10 @@ async function onCompress() {
 .contentInner {
   max-width: 920px;
   margin: 0 auto;
+}
+
+.contentInner.jsonWide {
+  max-width: max(920px, 65vw);
 }
 
 .header {
@@ -693,6 +772,52 @@ async function onCompress() {
   box-shadow: 0 0 0 4px rgb(var(--accent-rgb) / 0.18);
 }
 
+.textArea {
+  width: 100%;
+  box-sizing: border-box;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: transparent;
+  padding: 10px 12px;
+  font-size: 14px;
+  color: var(--text-h);
+  outline: none;
+  min-height: 220px;
+  resize: vertical;
+}
+
+.jsonCard .textArea {
+  height: 65svh;
+  min-height: 560px;
+}
+
+.textArea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 4px rgb(var(--accent-rgb) / 0.18);
+}
+
+.textArea.code {
+  font-family: var(--mono);
+  line-height: 1.45;
+}
+
+.jsonGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.jsonGrid + .actions {
+  margin-top: 12px;
+}
+
+.btnRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
 .actions {
   display: grid;
   gap: 12px;
@@ -837,6 +962,10 @@ async function onCompress() {
 
   .nav {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .jsonGrid {
+    grid-template-columns: 1fr;
   }
 }
 </style>
