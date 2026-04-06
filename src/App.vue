@@ -5,7 +5,7 @@ import { convertPdfFileToEpubBlob } from './utils/pdfToEpub'
 import { compressPdfFileToPdfBlob } from './utils/pdfCompress'
 import logo from './assets/vue.svg'
 
-type TabId = 'epub' | 'compress' | 'json' | 'qr'
+type TabId = 'epub' | 'compress' | 'json' | 'qr' | 'recolor'
 
 const activeTab = ref<TabId>('epub')
 
@@ -13,7 +13,8 @@ const headerTitle = computed(() => {
   if (activeTab.value === 'epub') return 'PDF 转 EPUB'
   if (activeTab.value === 'compress') return 'PDF 压缩'
   if (activeTab.value === 'json') return '格式化 JSON'
-  return '二维码生成器'
+  if (activeTab.value === 'qr') return '二维码生成器'
+  return '图片换色'
 })
 
 const headerSubtitle = computed(() => {
@@ -283,6 +284,288 @@ function onQrClear() {
   qrDataUrl.value = null
   qrError.value = null
 }
+
+const recolorFile = ref<File | null>(null)
+const recolorFileInputEl = ref<HTMLInputElement | null>(null)
+const recolorDragging = ref(false)
+const recolorError = ref<string | null>(null)
+const recolorBusy = ref(false)
+
+const recolorSourceColor = ref('#ff0000')
+const recolorTargetColor = ref('#2476ff')
+const recolorTolerance = ref(30)
+const recolorFeather = ref(20)
+
+const recolorCanvasEl = ref<HTMLCanvasElement | null>(null)
+let recolorOffCanvas: HTMLCanvasElement | null = null
+let recolorOffCtx: CanvasRenderingContext2D | null = null
+let recolorImageW = 0
+let recolorImageH = 0
+
+const recolorCanApply = computed(() => !!recolorFile.value && !recolorBusy.value)
+
+function isRasterImage(f: File) {
+  if (f.type && f.type.startsWith('image/') && f.type !== 'image/svg+xml') return true
+  return /\.(png|jpe?g|webp|gif|bmp)$/i.test(f.name)
+}
+
+function clampByte(n: number) {
+  return Math.max(0, Math.min(255, Math.round(n)))
+}
+
+function rgbToHex(r: number, g: number, b: number) {
+  const rr = clampByte(r).toString(16).padStart(2, '0')
+  const gg = clampByte(g).toString(16).padStart(2, '0')
+  const bb = clampByte(b).toString(16).padStart(2, '0')
+  return `#${rr}${gg}${bb}`
+}
+
+function hexToRgb(hex: string) {
+  const m = /^#?([\da-f]{2})([\da-f]{2})([\da-f]{2})$/i.exec(hex.trim())
+  if (!m) return null
+  return {
+    r: parseInt(m[1], 16),
+    g: parseInt(m[2], 16),
+    b: parseInt(m[3], 16),
+  }
+}
+
+function smoothstep(edge0: number, edge1: number, x: number) {
+  if (edge0 === edge1) return x < edge0 ? 0 : 1
+  const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)))
+  return t * t * (3 - 2 * t)
+}
+
+async function decodeImageToCanvas(file: File) {
+  try {
+    const bitmap = await createImageBitmap(file)
+    const canvas = document.createElement('canvas')
+    canvas.width = bitmap.width
+    canvas.height = bitmap.height
+    const ctx = canvas.getContext('2d')
+    if (!ctx) throw new Error('Canvas 初始化失败')
+    ctx.drawImage(bitmap, 0, 0)
+    bitmap.close?.()
+    return { canvas, ctx }
+  } catch {
+    const url = URL.createObjectURL(file)
+    try {
+      const img = new Image()
+      img.src = url
+      await img.decode()
+
+      const canvas = document.createElement('canvas')
+      canvas.width = img.naturalWidth
+      canvas.height = img.naturalHeight
+      const ctx = canvas.getContext('2d')
+      if (!ctx) throw new Error('Canvas 初始化失败')
+      ctx.drawImage(img, 0, 0)
+      return { canvas, ctx }
+    } finally {
+      URL.revokeObjectURL(url)
+    }
+  }
+}
+
+async function loadRecolorFile(file: File) {
+  recolorBusy.value = true
+  recolorError.value = null
+
+  try {
+    const { canvas, ctx } = await decodeImageToCanvas(file)
+    recolorOffCanvas = canvas
+    recolorOffCtx = ctx
+    recolorImageW = canvas.width
+    recolorImageH = canvas.height
+
+    const out = recolorCanvasEl.value
+    if (!out) return
+    out.width = recolorImageW
+    out.height = recolorImageH
+    const outCtx = out.getContext('2d')
+    if (!outCtx) throw new Error('Canvas 初始化失败')
+    outCtx.clearRect(0, 0, out.width, out.height)
+    outCtx.drawImage(canvas, 0, 0)
+  } catch (e) {
+    recolorOffCanvas = null
+    recolorOffCtx = null
+    recolorImageW = 0
+    recolorImageH = 0
+    recolorError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    recolorBusy.value = false
+  }
+}
+
+function setRecolorFile(f: File | null) {
+  recolorError.value = null
+  recolorFile.value = f
+
+  if (!f) {
+    recolorOffCanvas = null
+    recolorOffCtx = null
+    recolorImageW = 0
+    recolorImageH = 0
+
+    const out = recolorCanvasEl.value
+    const outCtx = out?.getContext('2d')
+    if (out && outCtx) {
+      out.width = 1
+      out.height = 1
+      outCtx.clearRect(0, 0, 1, 1)
+    }
+    return
+  }
+
+  void loadRecolorFile(f)
+}
+
+function onPickRecolor(e: Event) {
+  const input = e.target as HTMLInputElement
+  const f = input.files?.[0] || null
+  if (!f) return
+  if (!isRasterImage(f)) {
+    setRecolorFile(null)
+    recolorError.value = '请选择图片文件（PNG/JPG/WEBP/GIF/BMP）'
+    return
+  }
+  setRecolorFile(f)
+}
+
+function openRecolorPicker() {
+  recolorFileInputEl.value?.click()
+}
+
+function clearRecolorFile() {
+  setRecolorFile(null)
+  if (recolorFileInputEl.value) recolorFileInputEl.value.value = ''
+}
+
+function onRecolorDragOver() {
+  recolorDragging.value = true
+}
+
+function onRecolorDragLeave() {
+  recolorDragging.value = false
+}
+
+function onRecolorDrop(e: DragEvent) {
+  recolorDragging.value = false
+  const f = e.dataTransfer?.files?.[0] || null
+  if (!f) return
+  if (!isRasterImage(f)) {
+    setRecolorFile(null)
+    recolorError.value = '拖拽的不是图片文件'
+    return
+  }
+  setRecolorFile(f)
+}
+
+function onRecolorPickSourceFromCanvas(e: MouseEvent) {
+  if (!recolorOffCtx || !recolorCanvasEl.value) return
+
+  const rect = recolorCanvasEl.value.getBoundingClientRect()
+  const x = Math.max(0, Math.min(recolorImageW - 1, Math.floor(((e.clientX - rect.left) * recolorImageW) / rect.width)))
+  const y = Math.max(0, Math.min(recolorImageH - 1, Math.floor(((e.clientY - rect.top) * recolorImageH) / rect.height)))
+
+  const pixel = recolorOffCtx.getImageData(x, y, 1, 1).data
+  recolorSourceColor.value = rgbToHex(pixel[0], pixel[1], pixel[2])
+}
+
+function onRecolorReset() {
+  recolorError.value = null
+  if (!recolorOffCanvas || !recolorCanvasEl.value) return
+  const outCtx = recolorCanvasEl.value.getContext('2d')
+  if (!outCtx) return
+  outCtx.clearRect(0, 0, recolorCanvasEl.value.width, recolorCanvasEl.value.height)
+  outCtx.drawImage(recolorOffCanvas, 0, 0)
+}
+
+function onRecolorApply() {
+  recolorError.value = null
+  if (!recolorOffCtx || !recolorCanvasEl.value) return
+
+  const src = hexToRgb(recolorSourceColor.value)
+  const dst = hexToRgb(recolorTargetColor.value)
+  if (!src || !dst) {
+    recolorError.value = '颜色值无效'
+    return
+  }
+
+  const tol = (recolorTolerance.value / 100) * 255
+  const feather = (recolorFeather.value / 100) * 255
+
+  const img = recolorOffCtx.getImageData(0, 0, recolorImageW, recolorImageH)
+  const data = img.data
+
+  for (let i = 0; i < data.length; i += 4) {
+    const a = data[i + 3]
+    if (a === 0) continue
+
+    const r = data[i]
+    const g = data[i + 1]
+    const b = data[i + 2]
+
+    const dr = r - src.r
+    const dg = g - src.g
+    const db = b - src.b
+    const dist = Math.sqrt(dr * dr + dg * dg + db * db)
+
+    let w = 0
+    if (dist <= tol) {
+      w = 1
+    } else if (feather > 0 && dist < tol + feather) {
+      w = 1 - smoothstep(tol, tol + feather, dist)
+    }
+
+    if (w <= 0) continue
+
+    data[i] = clampByte(r + (dst.r - r) * w)
+    data[i + 1] = clampByte(g + (dst.g - g) * w)
+    data[i + 2] = clampByte(b + (dst.b - b) * w)
+  }
+
+  const outCtx = recolorCanvasEl.value.getContext('2d')
+  if (!outCtx) return
+  outCtx.putImageData(img, 0, 0)
+}
+
+function canvasToPngBlob(canvas: HTMLCanvasElement) {
+  return new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob(
+      (b) => {
+        if (b) resolve(b)
+        else reject(new Error('导出失败'))
+      },
+      'image/png',
+    )
+  })
+}
+
+async function onRecolorSave() {
+  recolorError.value = null
+  if (!recolorCanvasEl.value) return
+
+  recolorBusy.value = true
+  try {
+    const blob = await canvasToPngBlob(recolorCanvasEl.value)
+    const base = recolorFile.value?.name.replace(/\.[^.]+$/, '').trim() || 'image'
+    downloadBlob(blob, `${base}_recolor.png`)
+  } catch (e) {
+    recolorError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    recolorBusy.value = false
+  }
+}
+
+function onRecolorClear() {
+  clearRecolorFile()
+  recolorSourceColor.value = '#ff0000'
+  recolorTargetColor.value = '#2476ff'
+  recolorTolerance.value = 30
+  recolorFeather.value = 20
+  recolorError.value = null
+}
 </script>
 
 <template>
@@ -314,13 +597,16 @@ function onQrClear() {
         <button class="navItem" :class="{ active: activeTab === 'qr' }" type="button" @click="activeTab = 'qr'">
           二维码生成
         </button>
+        <button class="navItem" :class="{ active: activeTab === 'recolor' }" type="button" @click="activeTab = 'recolor'">
+          图片换色
+        </button>
       </nav>
 
       <div class="sideHint">文件不会上传服务器，所有处理都在浏览器本地完成</div>
     </aside>
 
     <main class="content">
-      <div class="contentInner" :class="{ jsonWide: activeTab === 'json' }">
+      <div class="contentInner" :class="{ jsonWide: activeTab === 'json' || activeTab === 'recolor' }">
         <header class="header">
           <h1 class="title">{{ headerTitle }}</h1>
           <p class="subtitle">{{ headerSubtitle }}</p>
@@ -528,7 +814,7 @@ function onQrClear() {
           </section>
         </main>
 
-        <main v-else class="card qrCard">
+        <main v-else-if="activeTab === 'qr'" class="card qrCard">
           <section class="section">
             <div class="qrGrid">
               <div class="field">
@@ -550,6 +836,94 @@ function onQrClear() {
               </div>
 
               <div v-if="qrError" class="alert">{{ qrError }}</div>
+            </div>
+          </section>
+        </main>
+
+        <main v-else class="card recolorCard">
+          <section class="section">
+            <div class="recolorGrid">
+              <div>
+                <div
+                  class="dropzone"
+                  :class="{ dragging: recolorDragging, hasFile: !!recolorFile }"
+                  @dragover.prevent="onRecolorDragOver"
+                  @dragleave.prevent="onRecolorDragLeave"
+                  @drop.prevent="onRecolorDrop"
+                >
+                  <input
+                    ref="recolorFileInputEl"
+                    class="fileInput"
+                    type="file"
+                    accept="image/*"
+                    @change="onPickRecolor"
+                  />
+
+                  <div class="dropMain">
+                    <button class="btn secondary" type="button" @click="openRecolorPicker">选择图片</button>
+                    <div class="hint">或将图片拖到这里</div>
+                  </div>
+
+                  <div v-if="recolorFile" class="fileMeta">
+                    <div class="fileName" :title="recolorFile.name">{{ recolorFile.name }}</div>
+                    <div class="fileInfo">
+                      <span>{{ fileSizeMB(recolorFile) }} MB</span>
+                      <span class="dot"></span>
+                      <span>IMAGE</span>
+                    </div>
+                    <button class="btn ghost" type="button" @click="clearRecolorFile">移除</button>
+                  </div>
+                </div>
+
+                <div class="recolorControls">
+                  <div class="recolorRow">
+                    <div class="recolorLabel">原色（点图片取色）</div>
+                    <input v-model="recolorSourceColor" class="colorInput" type="color" />
+                  </div>
+
+                  <div class="recolorRow">
+                    <div class="recolorLabel">目标色</div>
+                    <input v-model="recolorTargetColor" class="colorInput" type="color" />
+                  </div>
+
+                  <div class="rangeWrap">
+                    <input v-model.number="recolorTolerance" class="range" type="range" min="0" max="100" step="1" />
+                    <div class="rangeMeta">
+                      <div class="rangeValue">容差 {{ recolorTolerance }}%</div>
+                      <div class="rangeHint">越大替换范围越广</div>
+                    </div>
+                  </div>
+
+                  <div class="rangeWrap">
+                    <input v-model.number="recolorFeather" class="range" type="range" min="0" max="100" step="1" />
+                    <div class="rangeMeta">
+                      <div class="rangeValue">羽化 {{ recolorFeather }}%</div>
+                      <div class="rangeHint">越大边缘越柔和</div>
+                    </div>
+                  </div>
+
+                  <div class="actions">
+                    <div class="btnRow">
+                      <button class="btn primary" type="button" :disabled="!recolorCanApply" @click="onRecolorApply">应用换色</button>
+                      <button class="btn secondary" type="button" :disabled="!recolorFile || recolorBusy" @click="onRecolorSave">保存图片</button>
+                      <button class="btn ghost" type="button" :disabled="!recolorFile" @click="onRecolorReset">还原</button>
+                      <button class="btn ghost" type="button" @click="onRecolorClear">清空</button>
+                    </div>
+
+                    <div v-if="recolorError" class="alert">{{ recolorError }}</div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="recolorPreview" :class="{ empty: !recolorFile }">
+                <canvas
+                  v-if="recolorFile"
+                  ref="recolorCanvasEl"
+                  class="recolorCanvas"
+                  @click="onRecolorPickSourceFromCanvas"
+                ></canvas>
+                <div v-else class="recolorEmpty">暂无图片</div>
+              </div>
             </div>
           </section>
         </main>
@@ -909,6 +1283,70 @@ function onQrClear() {
   font-size: 13px;
 }
 
+.recolorGrid {
+  display: grid;
+  grid-template-columns: 420px 1fr;
+  gap: 12px;
+  align-items: start;
+}
+
+.recolorControls {
+  margin-top: 12px;
+  display: grid;
+  gap: 12px;
+}
+
+.recolorRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.recolorLabel {
+  font-size: 13px;
+  color: var(--text);
+  opacity: 0.85;
+}
+
+.colorInput {
+  width: 44px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: transparent;
+}
+
+.recolorPreview {
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: rgba(0, 0, 0, 0.02);
+  height: 65svh;
+  min-height: 560px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+.recolorPreview.empty {
+  color: var(--text);
+  opacity: 0.85;
+}
+
+.recolorCanvas {
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  display: block;
+  cursor: crosshair;
+}
+
+.recolorEmpty {
+  font-size: 13px;
+}
+
 .btnRow {
   display: flex;
   flex-wrap: wrap;
@@ -1067,6 +1505,10 @@ function onQrClear() {
   }
 
   .qrGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .recolorGrid {
     grid-template-columns: 1fr;
   }
 }
